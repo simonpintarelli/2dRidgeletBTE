@@ -1,0 +1,9 @@
+* =bte_omp=, =bte_omp_ftcg=
+
+** Input
+   - Coefficient Array (passed via ~--init==~, data; set =coeffs= will be loaded.
+   - Polar-Laguerre basis descriptor =spectral_basis.desc=
+   - collision tensor =collision_tensor.h5=
+
+*** Input coefficients
+    2d array with =nx= rows and =mv= columns. Velocity space in nodal basis, Fortran storage ordering.

@@ -1,0 +1,10 @@
+* test_hdf_writer
+
+Array =D= in =test.h5= is filled according to the rule
+#+BEGIN_SRC C
+  A[i][j][k] = pid*10^4 + 10*k + j
+#+END_SRC
+
+the array is distributed along the 3rd dimension (e.g. =k=). Use
+=main_test_hdf_writer.py= to verify that the contents in =test.h5= agree with
+the above formula.

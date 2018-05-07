@@ -1,0 +1,55 @@
+#+NAME: Ridgelet mass tensor
+
+* Output
+** =rt_basis.desc=
+   Ridgelet frame descriptor file for elements in the active set. Each line
+   consists of:
+
+   (j, s, k), ty, tx
+
+   where t=[tx, ty] is the translation grid vector, with values in [0,1).
+
+** =rt_tensor.h5=
+
+  The indices i1..3 map to a ridgelet function determined by (lambda, (ty, tx).
+  The corresponding ridgelet parameters ((j, s, k), ty, tx) can be found in
+  =rt_basis.desc=.
+
+  The tensor entries depend only on (lambda_1, lambda_2, lambda_3) and on the
+  difference of the translation grid vectors: t1-t2, t2-t3. The tensor is
+  symmetric, therefore only 1/6 of the entries are computed and stored.
+
+  * Data sets
+    * =indices= :: List of index tuple =(i1, i2, i3)=
+    * =offsets= :: Contains pointer into =indices=. For each i in
+                   length(offsets), the multi-index ~ii=indices[offsets[i]]~,
+                   appears also in locations ={indices[k] | k in
+                   offsets[i]...offsets[i+1]}=. The indices at the locations
+                   pointed to by =offsets= appear as keys in the list =values=.
+    * =values= :: It contains a list of tuples =(multi_index, value)=. Where
+                  =multi_index=(i1, i3, i3)=. =value= is normalized by the ridgelet basis
+                  normalization (rf_norm). Only unique values are stored. To retrieve the
+                  mirrored values, use =offsets= and =indices=.
+
+  Note: Due to technical reasons (OPENMP) =offsets= and =values= do not necessarily have the same length, because
+  entries smaller than a certain threshold won't be inserted into =values=, but
+  are added to indices in order to avoid re-computation.
+
+  Reconstruct tensor from =indices=, =offsets=, =values=:
+
+  1. Create key index list: ~key_ix = [indices[ix] for ix in offsets]~
+  2. Loop through values: for (multi_index, v) in values:
+     #+BEGIN_EXAMPLE
+       for (multi_index, v) in values:
+           ix = argfind(key_ix == multi_index)
+           # a list of multi_indices where overlap integral has value `v`
+           all_occurences = [indices[i] for i in range(offsets[ix], offsets[ix+1])]
+     #+END_EXAMPLE
+
+
+*** TODO prior to [[orgit-rev:~/work/Ridgelets/code/::55c86e6][rt-code (magit-rev 55c86e6)]] =rt_tensor= adds additional entries which do not fulfill i1 >= i2 >= i3. This can be filtered out during post-processing :ATTACH:
+    Python script to fix it is attached.
+    :PROPERTIES:
+    :Attachments: rt_tensor_cdecay.py
+    :ID:       46fc170e-8d49-4df6-9abb-82ec7c81d9be
+    :END:

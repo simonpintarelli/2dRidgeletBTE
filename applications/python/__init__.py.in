@@ -1,0 +1,431 @@
+from __future__ import absolute_import
+from .libpyFFRT import RidgeletFrame, RidgeletCellArray, RT, rt_type, Lambda
+from .rt_basis import get_basis
+
+from numpy import fft, array, prod
+from scipy.sparse import csr_matrix, spmatrix, coo_matrix
+import numpy as np
+
+
+def ift(Y, scale=True):
+    """
+    Keyword Arguments:
+    Y --
+    """
+    N = Y.shape
+    if scale:
+        return prod(N) * fft.ifft2(fft.ifftshift(Y))
+    else:
+        return fft.ifft2(fft.ifftshift(Y))
+
+
+def ft(X):
+    """
+    Keyword Arguments:
+    X --
+    """
+    N = X.shape
+    return 1. / prod(N) * fft.fftshift(fft.fft2(X))
+
+
+def rc_linearize(rca, rf=None, ret_indices=False):
+    """
+    Keyword Arguments:
+    rca --
+    rf  -- associated RidgeletFrame
+    ret_indices -- return a list of size len(lambdas), with begin end offset into lincoeff
+
+    Returns:
+    lincoeff
+    (lincoeff, indices)
+
+    """
+    lincoeff = np.array([])
+
+    if rf is None:
+        rf = rca.rf()
+
+    offset = 0
+    ranges = []
+    for i, l in enumerate(rf.lambdas()):
+        L = rca.get_coeff(i)
+        loffset = np.prod(L.shape)
+        ranges.append((offset, offset + loffset))
+        offset += loffset
+        lincoeff = np.hstack((lincoeff, (L).flatten() * rf.rf_norm(l)))
+
+    if ret_indices:
+        return (lincoeff, ranges)
+    else:
+        return lincoeff
+
+
+def rc_lin2cell(linearized, rf):
+    """
+    Insert ridgelet coefficients from 1d array `linearized`
+    into RidgeletCellArray
+
+    Keyword Arguments:
+    linearized -- 1d np.array
+    rf         -- ridgelet frame
+
+    Returns:
+    RidgeletCellArray
+    """
+
+    length = sum(map(lambda x: np.prod(x.shape), rf.lambdas()))
+    assert (len(linearized) == length)
+    rca = RidgeletCellArray(rf)
+
+    offset = 0
+    for i, l in enumerate(rf.lambdas()):
+        L = rca.get_coeff(i)
+        loffset = np.prod(L.shape)
+        offset += loffset
+        L[:] = 1 / rf.rf_norm(l) * np.reshape(
+            linearized[offset:offset + loffset], L.shape)
+
+    return rca
+
+
+def rclin_offsets(rf):
+    """
+    Keyword Arguments:
+    rf --
+
+    Returns [{'pos': (begin, end), 'l': lambda_t}]
+    """
+
+    entries = []
+    offset = 0
+    for l in rf.lambdas():
+        lbegin = offset
+        offset += np.prod(tgrid_dim(l, rf))
+        lentry = {'l': l, 'pos': (lbegin, offset)}
+        entries.append(lentry)
+
+    return entries
+
+
+def rc_truncate(rca, rttre, rf=None):
+    """
+    Keyword Arguments:
+    rca   --  Ridgelet coefficient array
+    rttre --  Fraction of coefficients to keep
+    rf    --  Ridgelet frame (default None)
+    """
+    Clin = rc_linearize(rca, rf)
+    tre = np.sort(np.abs(Clin))[int(len(Clin) * (1 - rttre))]
+
+    if rf is None:
+        rf = rca.rf()
+
+    for i, l in enumerate(rf.lambdas()):
+        # L is a np.array view to the coefficient array stored in the cpp module
+        L = rca.get_coeff(i)
+        L[...] = np.where(rf.rf_norm(l) * np.abs(L) < tre, np.zeros_like(L), L)
+
+
+def to_csr_matrix(indices, indptr, data, rows, cols):
+    """
+    Keyword Arguments:
+    indices --
+    indptr  --
+    data    --
+    rows    --
+    cols    --
+    """
+
+    return csr_matrix((data, indices, indptr), shape=(rows, cols))
+
+
+def ftcut(F, rows, cols):
+    """
+    Keyword Arguments:
+    F    --
+    rows --
+    cols --
+    """
+    this_rows, this_cols = F.shape
+    row_offset = this_rows // 2 - rows // 2
+    col_offset = this_cols // 2 - cols // 2
+
+    return F[row_offset:(row_offset + rows), col_offset:(col_offset + cols)]
+
+
+def ftcutr(F, rows, cols):
+    """
+    same as ftcut, but sets the max negative frequencies to zero in order
+    to get a purely real valued ift
+
+    Keyword Arguments:
+    F    -- Fourier coefficients in centered zero-frequency convection
+    rows --
+    cols --
+    """
+    tmp = np.copy(ftcut(F, rows, cols))
+    tmp[0, :] = 0
+    tmp[:, 0] = 0
+    return tmp
+
+
+def left_offset(new, old):
+    """
+    Keyword Arguments:
+    new --
+    old --
+    """
+    if new % 2 == old % 2:
+        return (new - old) // 2
+    elif new % 2 == 0 and old % 2 == 1:
+        return (new - old + 1) // 2
+    elif new % 2 == 1 and old % 2 == 0:
+        return (new - old) // 2
+
+
+def ftpad(F, rows, cols):
+    """
+    Keyword Arguments:
+    F    --
+    rows --
+    cols --
+    """
+
+    assert (F.shape[0] <= rows)
+    assert (F.shape[1] <= cols)
+
+    if isinstance(F, csr_matrix):
+        row_offset = left_offset(rows, F.shape[0])
+        col_offset = left_offset(cols, F.shape[1])
+        col_indices = F.indices
+        row_indices = F.indptr
+        data = F.data
+
+        row_indices = np.hstack(
+            (np.zeros(row_offset), row_indices,
+             (1 + rows - row_offset - len(row_indices)) * [row_indices[-1]]))
+        col_indices = col_indices + col_offset
+
+        return csr_matrix((data, col_indices, row_indices), shape=(rows, cols))
+    elif isinstance(F, np.ndarray):
+        Fnew = np.zeros((rows, cols), dtype=F.dtype)
+        ftcut(Fnew, F.shape[0], F.shape[1])[...] = F
+        return Fnew
+    else:
+        raise TypeError(
+            "ftpad expects a numpy.ndarray or a scipy.sparse.csr_matrix")
+
+
+def ftpadr(F, rows, cols):
+    """
+    Keyword Arguments:
+    F    --  cut max. negative frequencies (e.g. make sure ift of padded F is real-valued)
+    rows --
+    cols --
+    """
+    tmp = np.copy(F)
+    F[:, 0] = 0
+    F[0, :] = 0
+    return ftpad(tmp, rows, cols)
+
+
+def tgrid_dim(lam, rf=None):
+    """
+    Keyword Arguments:
+    lam -- lambda
+    rf -- RidgeletFrame, if None, rho_x, rho_y = 1 is assumed
+
+    Returns:
+    (Ty, Tx)
+    """
+    j = lam.j
+    t = lam.t
+
+    if rf is None:
+        rx = 1
+        ry = 1
+    else:
+        rx = rf.rho_x()
+        ry = rf.rho_y()
+
+    # Tx
+    if t is rt_type.s:
+        Tx = 4 * rx
+    elif t is rt_type.x:
+        Tx = 2**(j + 2) * rx
+    elif t is rt_type.y:
+        Tx = 8 * rx
+    elif t is rt_type.d:
+        Tx = 2**(j + 2) * rx
+
+    # Ty
+    if t is rt_type.s:
+        Ty = 4 * ry
+    elif t is rt_type.x:
+        Ty = 8 * ry
+    elif t is rt_type.y:
+        Ty = 2**(j + 2) * ry
+    elif t is rt_type.d:
+        Ty = 8 * ry
+
+    return (Ty, Tx)
+
+
+def rf_coeff_size(rf):
+    """
+    computes the dimension of the ridgelet frame.
+
+    Keyword Arguments:
+    rf -- ridgelet frame
+    """
+
+    return np.sum([np.prod(tgrid_dim(l, rf)) for l in rf.lambdas()])
+
+
+def tgrid_steps(lam, rf, Lx=1, Ly=1):
+    """
+
+    """
+    Tx, Ty = tgrid_dim(lam, rf)
+
+    tx_grid = np.linspace(0, Lx, Tx, endpoint=False)
+    ty_grid = np.linspace(0, Ly, Ty, endpoint=False)
+
+    return tx_grid, ty_grid
+
+
+def jind_array(rf):
+    """
+    returns an array jj of size == rc_linearize(rca),
+    jj[i] = J, where J is the level in which the i-th coefficient is contained.
+
+    Keyword Arguments:
+    rf -- ridgelet frame
+    """
+    sizes = [np.prod(tgrid_dim(l, rf)) for l in rf.lambdas()]
+    lambdas = list(rf.lambdas())
+    Js = [l.j for l in lambdas]
+    Jf = np.hstack([j * np.ones((s), dtype=np.int) for j, s in zip(Js, sizes)])
+
+    return Jf
+
+
+def ftgrid(n):
+    # 1d Fourier modes grid in zero-centered frequency convection
+    nmax = n // 2
+    nmin = -nmax
+    if n % 2 == 0:
+        nmax -= 1
+    grid = np.arange(nmin, nmax + 1)
+    assert (len(grid) == n)
+    return grid
+
+
+def ftgrid2(n, m):
+    # 2d Fourier modes grid in zero-centered frequency convection
+    return np.meshgrid(ftgrid(n), ftgrid(m))
+
+
+## window functions
+def rt_transition_function(x):
+    """
+    Keyword Arguments:
+    x --
+    """
+
+    return np.polyval([-20, 70, -84, 35, 0, 0, 0, 0], x)
+
+
+def wr(x, t=rt_transition_function):
+    x = array(x)
+    absx = abs(x)
+    m1 = np.logical_and(absx >= 1, absx <= 2)
+    m2 = np.logical_and(2 < absx, absx < 4)
+    y = np.zeros_like(x)
+    y[m1] = np.sin(np.pi / 2 * t(absx[m1] - 1))
+    y[m2] = np.cos(np.pi / 2 * t(0.5 * absx[m2] - 1))
+    return y
+
+
+def ws(x, t=rt_transition_function):
+    """
+    Keyword Arguments:
+    x --
+    t -- (default transition_function)
+    """
+    x = array(x)
+
+    s1 = np.logical_and(x > 0, x <= 1)
+    y = np.zeros_like(x)
+    y[s1] = np.sqrt(t(1 - x[s1]))
+
+    s2 = np.logical_and(x > 1, s1)
+    y[s2] = 0
+
+    s3 = np.logical_and(x <= 0, x >= -1)
+    y[s3] = np.sqrt(t(1 + x[s3]))
+    s4 = np.logical_and((x > 0), s3)
+    y[s4] = 1
+
+    return y
+
+
+class rt_index:
+    def __init__(self, rf):
+        """
+        Keyword Arguments:
+        rf -- RidgeletFrame
+        """
+
+        self.rf = rf
+
+        lam_sizes = []
+        for lam in rf.lambdas():
+            Ty, Tx = tgrid_dim(lam, rf)
+            lsize = Tx * Ty
+            lam_sizes.append(lsize)
+
+        self.lam_offsets = np.cumsum(lam_sizes)
+        self.lam_offsets[1:] = self.lam_offsets[:-1]
+        self.lam_offsets[0] = 0
+        self.lam2offset = {
+            str(ll): o
+            for ll, o in zip(rf.lambdas(), self.lam_offsets)
+        }
+
+    def to_linear(self, ll, t):
+        """
+        Keyword Arguments:
+        ll -- lambdas
+        t  -- tgrid index, this is a tuple (int, int)
+
+        Returns:
+        index into linearized array
+        """
+
+        Ty, Tx = tgrid_dim(ll, self.rf)
+        toffset = t[0] * Tx + t[1]
+        lam_offset = self.lam2offset[str(ll)]
+
+        return lam_offset + toffset
+
+    def to_lamt(self, index):
+        """
+        Keyword Arguments:
+        index -- index into linearized array
+
+        Returns:
+        (Lambda, t)
+        """
+
+        lam_index = np.where(index >= self.lam_offsets)[0][-1]
+        ll = self.rf.lambdas()[lam_index]
+        toffset = index - self.lam2offset[str(ll)]
+
+        Ty, Tx = tgrid_dim(ll, self.rf)
+        t0 = toffset // Ty
+        t1 = toffset % Tx
+
+        t = (t0, t1)
+
+        return (ll, t)

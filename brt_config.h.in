@@ -1,0 +1,4 @@
+// the configured options and settings for Tutorial
+#define GIT_SHA1  "@VERSION_SHA1@"
+#define GIT_BNAME "@BRANCHNAME@"
+#define GIT_DT    "@GIT_DESCRIBE_TAGS@"
